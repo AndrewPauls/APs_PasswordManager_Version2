@@ -2,7 +2,7 @@ use std::io::{self, Write};
 mod create_user_data;
 mod view_existing_entries;
 mod add_entry;
-
+mod hashPassword;
 use crate::create_user_data::LoginRecord;
 use crate::add_entry::{read_json, add_record, write_json};
 
