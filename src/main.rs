@@ -5,6 +5,7 @@ mod add_entry;
 mod hashPassword;
 use crate::create_user_data::LoginRecord;
 use crate::add_entry::{read_json, add_record, write_json};
+use crate::hashPassword::{hash_password, verify_hashed_password};
 
 fn main() {
     // create JSON 'db' of login records
@@ -30,13 +31,26 @@ fn viewExistingEntries() {
     // full record for each situation in which that person has a saved file
     let entries = view_existing_entries::view_entries_by_owner(ownersAccountName, "PasswordRecords.json").unwrap();
 
+    // view passwords in the clear now
+    println!("\nWe will now permit you to check if you know the correct passwords.");
     for entry in entries {
-        println!(
-            "Account: {} Username: {}, Password: {}", 
-            entry.account_name, entry.account_username, entry.account_password
-        );
-    }
+        println!( "Account: {} Username: {}, Password: _________", 
+            entry.account_name, entry.account_username, );
+        io::stdout().flush().unwrap();
 
+        let mut attempt = String::new();
+        io::stdin().read_line(&mut attempt).expect("Failed to read input");
+        let attempt = attempt.trim();
+
+        // verify now against saved json hash
+        if verify_hashed_password(&entry.account_password, attempt) {
+            println!("Correct Password!");
+        } else {
+            println!("Incorect Password.");
+        }
+
+        println!("<------------------------------------->");
+    }
 }
 
 fn exitMessage() {
@@ -82,11 +96,14 @@ fn beginSession() {
             let account_username = prompt("Enter account username: ");
             let account_password = prompt("Enter account password: ");
 
+            // hash
+            let hashed_password = hash_password(&account_password);
+
             let new_record = LoginRecord {
                 account_owner,
                 account_name,
                 account_username,
-                account_password,
+                account_password: hashed_password
             };
 
             records = add_record(records, new_record);
