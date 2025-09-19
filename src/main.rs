@@ -1,16 +1,28 @@
 use std::io::{self, Write};
+use mysql::prelude::*;
+use mysql::{Opts, Pool};
+use std::env;
+use mysql::params;
 mod create_user_data;
 mod view_existing_entries;
 mod add_entry;
 mod hashPassword;
+mod db;
 use crate::create_user_data::LoginRecord;
 use crate::add_entry::{read_json, add_record, write_json};
 use crate::hashPassword::{hash_password, verify_hashed_password};
+use std::fs;
+mod db_test;
 
 fn main() {
     // create JSON 'db' of login records
     create_user_data::create_user_data().unwrap();
 
+    // test db conn
+    match db_test::test_connection() {
+        Ok(_) => { println!("Connection successful!"); }
+        Err(e) => { eprintln!("Connection failed: {}", e); }
+    }
     entryMessage();      // tells user how to begin using PW Manager
     beginSession();      // use the PW Manager
     exitMessage();       // close program gracefully
@@ -27,30 +39,24 @@ fn viewExistingEntries() {
     let ownersAccountName = ownerInput.trim();
     println!("Preparing to print entries for the record owner: {}", ownersAccountName);
 
-    // for each entry in the json file, check for that owners name, and then print the 
-    // full record for each situation in which that person has a saved file
-    let entries = view_existing_entries::view_entries_by_owner(ownersAccountName, "PasswordRecords.json").unwrap();
+    let pool = db::get_pool().unwrap();
+    let mut conn = db::get_conn(&pool).unwrap();
 
-    // view passwords in the clear now
-    println!("\nWe will now permit you to check if you know the correct passwords.");
-    for entry in entries {
-        println!( "Account: {} Username: {}, Password: _________", 
-            entry.account_name, entry.account_username, );
-        io::stdout().flush().unwrap();
-
-        let mut attempt = String::new();
-        io::stdin().read_line(&mut attempt).expect("Failed to read input");
-        let attempt = attempt.trim();
-
-        // verify now against saved json hash
-        if verify_hashed_password(&entry.account_password, attempt) {
-            println!("Correct Password!");
-        } else {
-            println!("Incorect Password.");
-        }
-
-        println!("<------------------------------------->");
-    }
+    let entries: Vec<LoginRecord> = conn.exec_map(
+        "SELECT account_owner, account_name, account_username, account_password
+        FROM password_records WHERE account_owner = :owner",
+        params! {
+            "owner" => ownersAccountName,
+        },
+        |(account_owner, account_name, account_username, account_password) | {
+            LoginRecord {
+                account_owner,
+                account_name,
+                account_username,
+                account_password,
+            }
+        },
+    ).expect("Failed to fetch records");        
 }
 
 fn exitMessage() {
@@ -81,8 +87,6 @@ fn beginSession() {
         }
         else if decision == "B" {
             println!("\nPlease enter the data for the new entry.");
-            let file_path = "PasswordRecords.json";
-            let mut records = read_json(file_path).unwrap();
             fn prompt(msg: &str) -> String {
                 print!("{}", msg);
                 io::stdout().flush().unwrap();
@@ -106,11 +110,21 @@ fn beginSession() {
                 account_password: hashed_password
             };
 
-            records = add_record(records, new_record);
+            let pool = db::get_pool().unwrap();
+            let mut conn = db::get_conn(&pool).unwrap();
 
-            //write back to json
-            write_json(&records, file_path).unwrap();
-            continue;
+            conn.exec_drop(
+                "INSERT INTO password_records (account_owner, account_name, account_username, account_password)
+                VALUES (:owner, :name, :username, :password)",
+                params! {
+                    "owner" => &new_record.account_owner,
+                    "name" => &new_record.account_name,
+                    "username" => &new_record.account_username,
+                    "password" => &new_record.account_password,
+                }
+            ).expect("Failed to insert record");
+
+            continue
         }
         else if decision == "C" {
             println!("\nExiting now.");
