@@ -57,6 +57,11 @@ fn viewExistingEntries() {
             }
         },
     ).expect("Failed to fetch records");        
+    for entry in &entries {
+        println!("\nAccount: {}", entry.account_name);
+        println!("Username: {}", entry.account_username);
+        println!("Password (hashed): {}\t", entry.account_password);
+    }
 }
 
 fn exitMessage() {
@@ -123,7 +128,7 @@ fn beginSession() {
                     "password" => &new_record.account_password,
                 }
             ).expect("Failed to insert record");
-
+            println!("\nSuccessfully added new entry for '{}'.", new_record.account_owner);
             continue
         }
         else if decision == "C" {
