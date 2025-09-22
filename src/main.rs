@@ -1,66 +1,250 @@
 use std::io::{self, Write};
-mod create_user_data;
-mod view_existing_entries;
-mod add_entry;
+use serde::{Deserialize, Serialize};
+use reqwest::Client;
+use rpassword::read_password;
 mod hashPassword;
-use crate::create_user_data::LoginRecord;
-use crate::add_entry::{read_json, add_record, write_json};
-use crate::hashPassword::{hash_password, verify_hashed_password};
-
-fn main() {
-    // create JSON 'db' of login records
-    create_user_data::create_user_data().unwrap();
-
-    entryMessage();      // tells user how to begin using PW Manager
-    beginSession();      // use the PW Manager
-    exitMessage();       // close program gracefully
-
+use hashPassword::verify_hashed_password;
+#[derive(Debug, Serialize, Deserialize)]
+struct AddEntry {
+    owner: String,
+    name: String,
+    username: String,
+    password: String,
 }
 
-fn viewExistingEntries() {
-    println!("\n\nPlease type in the account owners name to see their records.");
-    let mut ownerInput = String::new();
+#[derive(Debug, Serialize, Deserialize)]
+struct Entry {
+    account_owner: Option<String>,
+    account_name: Option<String>,
+    account_username: Option<String>,
+    account_password: Option<String>,
+}
+
+#[tokio::main]
+async fn main() {
+    entry_message().await;
+    begin_session().await;
+    exit_message().await;
+}
+
+pub async fn view_existing_entries(client: &Client) {
+    println!("\n\nPlease type in the account owner's name to see their records.");
+    let mut owner_input = String::new();
     io::stdin()
-        .read_line(&mut ownerInput)
+        .read_line(&mut owner_input)
         .expect("Failed to read input");
+    let owner = owner_input.trim();
 
-    let ownersAccountName = ownerInput.trim();
-    println!("Preparing to print entries for the record owner: {}", ownersAccountName);
+    let url = format!("http://127.0.0.1:3000/entries/{}", owner);
+    let resp = client.get(&url).send().await;
 
-    // for each entry in the json file, check for that owners name, and then print the 
-    // full record for each situation in which that person has a saved file
-    let entries = view_existing_entries::view_entries_by_owner(ownersAccountName, "PasswordRecords.json").unwrap();
+    match resp {
+        Ok(response) => {
+            if response.status().is_success() {
+                let entries: Vec<Entry> = response.json().await.unwrap_or_else(|_| {
+                    println!("Failed to parse JSON from server response.");
+                    Vec::new()
+                });
 
-    // view passwords in the clear now
-    println!("\nWe will now permit you to check if you know the correct passwords.");
-    for entry in entries {
-        println!( "Account: {} Username: {}, Password: _________", 
-            entry.account_name, entry.account_username, );
-        io::stdout().flush().unwrap();
+                if entries.is_empty() {
+                    println!("No entries found for owner '{}'.", owner);
+                    return;
+                }
 
-        let mut attempt = String::new();
-        io::stdin().read_line(&mut attempt).expect("Failed to read input");
-        let attempt = attempt.trim();
+                println!("Entries for owner '{}':", owner);
+                for (i, entry) in entries.iter().enumerate() {
+                    println!("{}. Account: {}", i + 1, entry.account_name.clone().unwrap_or_default());
+                    println!("   Username: {}", entry.account_username.clone().unwrap_or_default());
+                    println!("   Password (hashed): {}", entry.account_password.clone().unwrap_or_default());
+                }
 
-        // verify now against saved json hash
-        if verify_hashed_password(&entry.account_password, attempt) {
-            println!("Correct Password!");
-        } else {
-            println!("Incorect Password.");
+                // Options for user
+                println!("\nOptions:");
+                println!("  Enter a number to check its password");
+                println!("  Enter d<number> to delete that entry (e.g., d2 to delete entry 2)");
+                println!("  Or just press Enter to skip:");
+
+                let mut sel_input = String::new();
+                io::stdin()
+                    .read_line(&mut sel_input)
+                    .expect("Failed to read input");
+                let sel_trim = sel_input.trim();
+
+                if sel_trim.is_empty() {
+                    println!("Skipped.");
+                    return;
+                }
+
+                // Handle delete case
+                if sel_trim.starts_with('d') {
+                    let num_str = &sel_trim[1..];
+                    let sel_idx: usize = match num_str.parse::<usize>() {
+                        Ok(n) if n >= 1 && n <= entries.len() => n - 1,
+                        _ => {
+                            println!("Invalid selection.");
+                            return;
+                        }
+                    };
+
+                    let selected = &entries[sel_idx];
+                    let stored_hash = match &selected.account_password {
+                        Some(h) if !h.is_empty() => h,
+                        _ => {
+                            println!("Selected entry has no stored password hash.");
+                            return;
+                        }
+                    };
+
+                    // Ask user for the password before deletion
+                    println!("Enter the password to confirm deletion: ");
+                    let assumed = match read_password() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            println!("Failed to read password: {}", e);
+                            return;
+                        }
+                    };
+
+                    // Verify the entered password
+                    if verify_hashed_password(stored_hash, &assumed) {
+                        let owner = selected.account_owner.clone().unwrap_or_default();
+                        let name = selected.account_name.clone().unwrap_or_default();
+                        let url = format!("http://127.0.0.1:3000/delete/{}/{}", owner, name);
+
+                        let resp = client.delete(&url).send().await;
+                        match resp {
+                            Ok(r) => println!("Server: {}", r.text().await.unwrap_or_default()),
+                            Err(e) => println!("Failed to contact server: {}", e),
+                        }
+                    } else {
+                        println!("Incorrect password. Entry not deleted.");
+                    }
+                    return;
+                }
+
+                // Handle password verification case
+                let sel_idx: usize = match sel_trim.parse::<usize>() {
+                    Ok(n) if n >= 1 && n <= entries.len() => n - 1,
+                    _ => {
+                        println!("Invalid selection.");
+                        return;
+                    }
+                };
+
+                let selected = &entries[sel_idx];
+                let stored_hash = match &selected.account_password {
+                    Some(h) if !h.is_empty() => h,
+                    _ => {
+                        println!("Selected entry has no stored password hash.");
+                        return;
+                    }
+                };
+
+                println!("Enter the password to check: ");
+                let assumed = match read_password() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        println!("Failed to read password: {}", e);
+                        return;
+                    }
+                };
+
+                if verify_hashed_password(stored_hash, &assumed) {
+                    println!("Correct password.");
+                } else {
+                    println!("Incorrect password.");
+                }
+            } else {
+                println!("Server responded with status: {}", response.status());
+            }
         }
-
-        println!("<------------------------------------->");
+        Err(e) => {
+            println!("Failed to contact server: {}", e);
+        }
     }
 }
 
-fn exitMessage() {
-    let string4 = "Thank you for using AP's Password Manager. Powering down.";
-    println!("\n{}", string4);
+async fn add_new_entry(client: &Client) {
+    println!("\nPlease enter the data for the new entry.");
+
+    fn prompt(msg: &str) -> String {
+        print!("{}", msg);
+        io::stdout().flush().unwrap();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).expect("Failed to read line");
+        input.trim().to_string()
+    }
+
+    let account_owner = prompt("Enter account owner: ");
+    let account_name = prompt("Enter account name: ");
+    let account_username = prompt("Enter account username: ");
+    let account_password = prompt("Enter account password: ");
+
+    let hashed_password = hashPassword::hash_password(&account_password);
+    let new_entry = AddEntry {
+        owner: account_owner,
+        name: account_name,
+        username: account_username,
+        password: hashed_password,
+    };
+
+    let resp = client.post("http://127.0.0.1:3000/add")
+        .json(&new_entry)
+        .send()
+        .await;
+
+    match resp {
+        Ok(response) => {
+            if response.status().is_success() {
+                println!("\nSuccessfully added new entry.");
+                println!("  Owner: {}", new_entry.owner);
+                println!("  Name: {}", new_entry.name);
+                println!("  Username: {}", new_entry.username);
+                println!("  Password: {}", account_password);
+            } else {
+                println!("Failed to add entry. Server status: {}", response.status());
+            }
+        }
+        Err(e) => {
+            println!("Failed to contact server: {}", e);
+        }
+    }
 }
 
-fn entryMessage() {
+async fn begin_session() {
+    let client = reqwest::Client::new();
+
+    loop {
+        let decision = get_decision().await;
+        match decision.as_str() {
+            "A" => view_existing_entries(&client).await,
+            "B" => add_new_entry(&client).await,
+            "C" => {
+                println!("\nExiting now.");
+                break;
+            }
+            _ => println!("\nInvalid choice, please try again."),
+        }
+    }
+}
+
+async fn get_decision() -> String {
+    let prompt = "\n\nWould you like to \nA - View existing entries?\nB - Add a new entry?\nC - Quit";
+    let reminder = "Please enter A, B, or C.";
+    println!("{}", prompt);
+    println!("{}", reminder);
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .expect("Failed to read decision");
+
+    input.trim().to_uppercase()
+}
+
+async fn entry_message() {
     println!("Hello! This is AP's Password Management Application!");
-    let string1 = "Please enter your name:"; println!("{} ", string1);
+    println!("Please enter your name:");
 
     let mut input = String::new();
     io::stdin()
@@ -71,74 +255,7 @@ fn entryMessage() {
     println!("Hello there {}!", name);
 }
 
-fn beginSession() {
-    while true {
-        let decision = getDecision();
-        if decision == "A" {
-            // view existing entries function
-            viewExistingEntries();
-            continue;
-        }
-        else if decision == "B" {
-            println!("\nPlease enter the data for the new entry.");
-            let file_path = "PasswordRecords.json";
-            let mut records = read_json(file_path).unwrap();
-            fn prompt(msg: &str) -> String {
-                print!("{}", msg);
-                io::stdout().flush().unwrap();
-                let mut input = String::new();
-                io::stdin().read_line(&mut input).expect("Failed to read line");
-                input.trim().to_string()
-            }
-
-            let account_owner = prompt("Enter account owner: ");
-            let account_name = prompt("Enter account name: ");
-            let account_username = prompt("Enter account username: ");
-            let account_password = prompt("Enter account password: ");
-
-            // hash
-            let hashed_password = hash_password(&account_password);
-
-            let new_record = LoginRecord {
-                account_owner,
-                account_name,
-                account_username,
-                account_password: hashed_password
-            };
-
-            records = add_record(records, new_record);
-
-            //write back to json
-            write_json(&records, file_path).unwrap();
-            continue;
-        }
-        else if decision == "C" {
-            println!("\nExiting now.");
-            break;
-        }
-        else {
-            println!("\nFailed to detect valid decision.");
-            // reroute user back to entering valid input
-            continue
-        }
-    }
+async fn exit_message() {
+    println!("\nThank you for using AP's Password Manager. Powering down.");
 }
 
-fn getDecision() -> String {
-    let string2 = "\n\nWould you like to \nA - View existing entries?\
-                   \nB - Add a new entry?\
-                   \nC - Quit";
-    let string3 = "Please enter A, B, or C.";
-    println!("{} ", string2);
-    println!("{} ", string3);
-
-    let mut input2 = String::new();
-    io::stdin()
-        .read_line(&mut input2)
-        .expect("Failed to read decision");
-
-    let decision = input2.trim();
-    println!("\nYou have decided {}.", decision);
-
-    decision.to_string()
-}

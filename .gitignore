@@ -1,1 +1,7 @@
-/target
+/target/
+**/*.rs.bk
+**/*.rs.old
+
+
+# environment vars
+.env
