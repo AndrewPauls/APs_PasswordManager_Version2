@@ -1,6 +1,6 @@
 use axum::{
-    routing::{get, post},
-    Router, Json, extract::State
+    routing::{get, post, delete},
+    Router, Json, extract::{State, Path}
 };
 use serde::{Deserialize, Serialize};
 use sqlx::mysql::MySqlPoolOptions;
@@ -32,8 +32,9 @@ struct Entry {
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
-    let db_url = "mysql://appuser:kZMHz43s3D8!!@localhost:3306/password_manager";
 
+    let db_url = env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set in .env");
     let db_pool = MySqlPoolOptions::new()
         .max_connections(5)
         .connect(&db_url)
@@ -45,6 +46,7 @@ async fn main() {
     let app = Router::new()
         .route("/add", post(add_entry))
         .route("/entries/:owner", get(get_entries))
+        .route("/delete/:owner/:name", delete(delete_entry)) // new delete endpoint
         .with_state(app_state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
@@ -78,7 +80,7 @@ async fn add_entry(
 
 async fn get_entries(
     State(state): State<AppState>,
-    axum::extract::Path(owner): axum::extract::Path<String>,
+    Path(owner): Path<String>,
 ) -> Json<Vec<Entry>> {
     let rows = sqlx::query_as!(
         Entry,
@@ -95,3 +97,26 @@ async fn get_entries(
 
     Json(rows)
 }
+
+async fn delete_entry(
+    State(state): State<AppState>,
+    Path((owner, name)): Path<(String, String)>,
+) -> Json<&'static str> {
+    let result = sqlx::query!(
+        r#"
+        DELETE FROM password_records
+        WHERE account_owner = ? AND account_name = ?
+        "#,
+        owner,
+        name,
+    )
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(res) if res.rows_affected() > 0 => Json("Record deleted successfully"),
+        Ok(_) => Json("No matching record found"),
+        Err(_) => Json("Failed to delete record"),
+    }
+}
+
