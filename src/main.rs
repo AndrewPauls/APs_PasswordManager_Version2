@@ -1,9 +1,18 @@
-use std::io::{self, Write};
+use axum::{
+    extract::{Path, State},
+    routing::{delete, get, post},
+    Json, Router,
+};
+use dotenvy::dotenv;
+use hyper::Server;
 use serde::{Deserialize, Serialize};
+use sqlx::mysql::MySqlPoolOptions;
+use std::io::{self, Write};
 use reqwest::Client;
-use rpassword::read_password;
+use rpassword::read_password;   // Import the `read_password` function from the `rpassword` crate
 mod hashPassword;
-use hashPassword::verify_hashed_password;
+use hashPassword::verify_hashed_password; // Import the `verify_hashed_password` function from your local `hashPassword` module
+
 #[derive(Debug, Serialize, Deserialize)]
 struct AddEntry {
     owner: String,
@@ -29,11 +38,7 @@ async fn main() {
 
 pub async fn view_existing_entries(client: &Client) {
     println!("\n\nPlease type in the account owner's name to see their records.");
-    let mut owner_input = String::new();
-    io::stdin()
-        .read_line(&mut owner_input)
-        .expect("Failed to read input");
-    let owner = owner_input.trim();
+    let owner = read_input();
 
     let url = format!("http://127.0.0.1:3000/entries/{}", owner);
     let resp = client.get(&url).send().await;
@@ -46,113 +51,20 @@ pub async fn view_existing_entries(client: &Client) {
                     Vec::new()
                 });
 
-                if entries.is_empty() {
-                    println!("No entries found for owner '{}'.", owner);
-                    return;
-                }
-
-                println!("Entries for owner '{}':", owner);
-                for (i, entry) in entries.iter().enumerate() {
-                    println!("{}. Account: {}", i + 1, entry.account_name.clone().unwrap_or_default());
-                    println!("   Username: {}", entry.account_username.clone().unwrap_or_default());
-                    println!("   Password (hashed): {}", entry.account_password.clone().unwrap_or_default());
-                }
+                display_entries(&entries);
 
                 // Options for user
-                println!("\nOptions:");
-                println!("  Enter a number to check its password");
-                println!("  Enter d<number> to delete that entry (e.g., d2 to delete entry 2)");
-                println!("  Or just press Enter to skip:");
-
-                let mut sel_input = String::new();
-                io::stdin()
-                    .read_line(&mut sel_input)
-                    .expect("Failed to read input");
-                let sel_trim = sel_input.trim();
+                let sel_trim = read_input();
 
                 if sel_trim.is_empty() {
                     println!("Skipped.");
                     return;
                 }
 
-                // Handle delete case
                 if sel_trim.starts_with('d') {
-                    let num_str = &sel_trim[1..];
-                    let sel_idx: usize = match num_str.parse::<usize>() {
-                        Ok(n) if n >= 1 && n <= entries.len() => n - 1,
-                        _ => {
-                            println!("Invalid selection.");
-                            return;
-                        }
-                    };
-
-                    let selected = &entries[sel_idx];
-                    let stored_hash = match &selected.account_password {
-                        Some(h) if !h.is_empty() => h,
-                        _ => {
-                            println!("Selected entry has no stored password hash.");
-                            return;
-                        }
-                    };
-
-                    // Ask user for the password before deletion
-                    println!("Enter the password to confirm deletion: ");
-                    let assumed = match read_password() {
-                        Ok(s) => s,
-                        Err(e) => {
-                            println!("Failed to read password: {}", e);
-                            return;
-                        }
-                    };
-
-                    // Verify the entered password
-                    if verify_hashed_password(stored_hash, &assumed) {
-                        let owner = selected.account_owner.clone().unwrap_or_default();
-                        let name = selected.account_name.clone().unwrap_or_default();
-                        let url = format!("http://127.0.0.1:3000/delete/{}/{}", owner, name);
-
-                        let resp = client.delete(&url).send().await;
-                        match resp {
-                            Ok(r) => println!("Server: {}", r.text().await.unwrap_or_default()),
-                            Err(e) => println!("Failed to contact server: {}", e),
-                        }
-                    } else {
-                        println!("Incorrect password. Entry not deleted.");
-                    }
-                    return;
-                }
-
-                // Handle password verification case
-                let sel_idx: usize = match sel_trim.parse::<usize>() {
-                    Ok(n) if n >= 1 && n <= entries.len() => n - 1,
-                    _ => {
-                        println!("Invalid selection.");
-                        return;
-                    }
-                };
-
-                let selected = &entries[sel_idx];
-                let stored_hash = match &selected.account_password {
-                    Some(h) if !h.is_empty() => h,
-                    _ => {
-                        println!("Selected entry has no stored password hash.");
-                        return;
-                    }
-                };
-
-                println!("Enter the password to check: ");
-                let assumed = match read_password() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        println!("Failed to read password: {}", e);
-                        return;
-                    }
-                };
-
-                if verify_hashed_password(stored_hash, &assumed) {
-                    println!("Correct password.");
+                    handle_delete(sel_trim, &entries, client).await;
                 } else {
-                    println!("Incorrect password.");
+                    handle_verification(sel_trim, &entries).await;
                 }
             } else {
                 println!("Server responded with status: {}", response.status());
@@ -161,6 +73,113 @@ pub async fn view_existing_entries(client: &Client) {
         Err(e) => {
             println!("Failed to contact server: {}", e);
         }
+    }
+}
+
+fn read_input() -> String {
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .expect("Failed to read input");
+    input.trim().to_string()
+}
+
+fn display_entries(entries: &[Entry]) {
+    if entries.is_empty() {
+        println!("No entries found.");
+        return;
+    }
+
+    println!("Entries for the owner:");
+    for (i, entry) in entries.iter().enumerate() {
+        println!("{}. Account: {}", i + 1, entry.account_name.clone().unwrap_or_default());
+        println!("   Username: {}", entry.account_username.clone().unwrap_or_default());
+        println!("   Password (hashed): {}", entry.account_password.clone().unwrap_or_default());
+    }
+
+    // Options for user
+    println!("\nOptions:");
+    println!("  Enter a number to check its password");
+    println!("  Enter d<number> to delete that entry (e.g., d2 to delete entry 2)");
+    println!("  Or just press Enter to skip:");
+}
+
+async fn handle_delete(sel_trim: String, entries: &[Entry], client: &Client) {
+    let num_str = &sel_trim[1..];
+    let sel_idx: usize = match num_str.parse::<usize>() {
+        Ok(n) if n >= 1 && n <= entries.len() => n - 1,
+        _ => {
+            println!("Invalid selection.");
+            return;
+        }
+    };
+
+    let selected = &entries[sel_idx];
+    let stored_hash = match &selected.account_password {
+        Some(h) if !h.is_empty() => h,
+        _ => {
+            println!("Selected entry has no stored password hash.");
+            return;
+        }
+    };
+
+    // Ask user for the password before deletion
+    println!("Enter the password to confirm deletion: ");
+    let assumed = match read_password() {
+        Ok(s) => s,
+        Err(e) => {
+            println!("Failed to read password: {}", e);
+            return;
+        }
+    };
+
+    // Verify the entered password
+    if verify_hashed_password(stored_hash, &assumed) {
+        let owner = selected.account_owner.clone().unwrap_or_default();
+        let name = selected.account_name.clone().unwrap_or_default();
+        let url = format!("http://127.0.0.1:3000/delete/{}/{}", owner, name);
+
+        let resp = client.delete(&url).send().await;
+        match resp {
+            Ok(r) => println!("Server: {}", r.text().await.unwrap_or_default()),
+            Err(e) => println!("Failed to contact server: {}", e),
+        }
+    } else {
+        println!("Incorrect password. Entry not deleted.");
+    }
+}
+
+async fn handle_verification(sel_trim: String, entries: &[Entry]) {
+    let sel_idx: usize = match sel_trim.parse::<usize>() {
+        Ok(n) if n >= 1 && n <= entries.len() => n - 1,
+        _ => {
+            println!("Invalid selection.");
+            return;
+        }
+    };
+
+    let selected = &entries[sel_idx];
+    let stored_hash = match &selected.account_password {
+        Some(h) if !h.is_empty() => h,
+        _ => {
+            println!("Selected entry has no stored password hash.");
+            return;
+        }
+    };
+
+    println!("Enter the password to check: ");
+    let assumed = match read_password() {
+        Ok(s) => s,
+        Err(e) => {
+            println!("Failed to read password: {}", e);
+            return;
+        }
+    };
+
+    if verify_hashed_password(stored_hash, &assumed) {
+        println!("Correct password.");
+    } else {
+        println!("Incorrect password.");
     }
 }
 
@@ -258,4 +277,3 @@ async fn entry_message() {
 async fn exit_message() {
     println!("\nThank you for using AP's Password Manager. Powering down.");
 }
-
