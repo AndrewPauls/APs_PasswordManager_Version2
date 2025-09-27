@@ -33,7 +33,9 @@ struct Entry {
 async fn main() {
     dotenvy::dotenv().ok();
 
-    let db_url = "mysql://appuser:kZMHz43s3D8!!@localhost:3306/password_manager";
+    let db_url = std::env::var("DATABASE_URL")
+    .expect("DATABASE_URL must be set");
+
     let db_pool = MySqlPoolOptions::new()
         .max_connections(5)
         .connect(&db_url)
@@ -118,4 +120,3 @@ async fn delete_entry(
         Err(_) => Json("Failed to delete record"),
     }
 }
-
