@@ -58,10 +58,15 @@ async fn main() {
         .unwrap();
 }
 
+#[derive(Serialize)]
+struct ApiResponse {
+    message: String,
+}
+
 async fn add_entry(
     State(state): State<AppState>,
     Json(payload): Json<AddEntry>,
-) -> Json<&'static str> {
+) -> Json<ApiResponse> {
     sqlx::query!(
         r#"
         INSERT INTO password_records (account_owner, account_name, account_username, account_password)
@@ -76,7 +81,9 @@ async fn add_entry(
     .await
     .unwrap();
 
-    Json("Record added successfully")
+    Json(ApiResponse {
+        message: "Record added successfully".into(),
+    })
 }
 
 async fn get_entries(
@@ -102,7 +109,7 @@ async fn get_entries(
 async fn delete_entry(
     State(state): State<AppState>,
     Path((owner, name)): Path<(String, String)>,
-) -> Json<&'static str> {
+) -> Json<ApiResponse> {
     let result = sqlx::query!(
         r#"
         DELETE FROM password_records
@@ -115,8 +122,17 @@ async fn delete_entry(
     .await;
 
     match result {
-        Ok(res) if res.rows_affected() > 0 => Json("Record deleted successfully"),
-        Ok(_) => Json("No matching record found"),
-        Err(_) => Json("Failed to delete record"),
+        Ok(res) if res.rows_affected() > 0 => Json(ApiResponse {
+            message: "Record deleted successfully".to_string(),
+        }),
+        Ok(_) => Json(ApiResponse {
+            message: "No matching records found.".to_string(),
+        }),
+        Err(e) => {
+            eprintln!("Delete error: {:?}", e);
+            Json(ApiResponse {
+                message: "Failed to delete record".to_string(),
+            })
+        }
     }
 }
