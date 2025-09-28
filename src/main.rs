@@ -13,6 +13,11 @@ use rpassword::read_password;           // Import the `read_password` function f
 mod hashPassword;                       // Import of local `hashPassword` module
 use hashPassword::verify_hashed_password; // Import the `verify_hashed_password` function from your local `hashPassword` module
 
+#[derive(Deserialize)]
+struct ApiResponse {
+    message: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]    // Struct for adding a new entry
 struct AddEntry {
     owner: String,
@@ -194,7 +199,17 @@ async fn handle_delete(sel_trim: String, entries: &[Entry], client: &Client) {
 
         let resp = client.delete(&url).send().await;    // acquire response from cleint after attempting delete operation
         match resp {
-            Ok(r) => println!("Server: {}", r.text().await.unwrap_or_default()),    // if valide response, print server response
+            Ok(r) => {
+                let body_text = r.text().await.unwrap_or_default(); // read body once
+
+                match serde_json::from_str::<ApiResponse>(&body_text) {
+                    Ok(api_resp) => println!("Server: {}", api_resp.message),
+                    Err(e) => {
+                        println!("Failed to parse server response: {}", e);
+                        println!("Raw response: {}", body_text);
+                    }
+                }
+            }
             Err(e) => println!("Failed to contact server: {}", e),
         }
     } else {
@@ -301,13 +316,12 @@ async fn add_new_entry(client: &Client) {
     match resp {
         Ok(response) => {
             if response.status().is_success() {
-                println!("\nSuccessfully added new entry.");
-                println!("  Owner: {}", new_entry.owner);
-                println!("  Name: {}", new_entry.name);
-                println!("  Username: {}", new_entry.username);
-                println!("  Password: {}", account_password);
+               match response.json::<ApiResponse>().await {
+                   Ok(api_resp) => println!("{}", api_resp.message),
+                   Err(e) => println!("Failed to parse API response: {}", e),
+               } 
             } else {
-                println!("Failed to add entry. Server status: {}", response.status());
+                   println!("Server error: {}", response.status());
             }
         }
         Err(e) => {
